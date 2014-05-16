@@ -4,6 +4,8 @@ use strict;
 use warnings;
 
 use WWW::Curl::Easy;
+use Getopt::Long;
+use Pod::Usage;
 
 my $home_url = "http://www.mk.ru/news/";
 my $content_div_id = "article-content";
@@ -12,6 +14,20 @@ my $news_list_class_name = "news_list_big";
 my $news_list_tag_name = "ul";
 my $article_tag_name = "div";
 my $out_f_name = "news_list";
+my $show_help = 0;
+my $verbose = 0;
+
+GetOptions(
+    "website=s"     => \$home_url,
+    "out=s"         => \$out_f_name,
+    "verbose"       => \$verbose,
+    "help"          => \$show_help,
+);
+
+if ($show_help) {
+    pod2usage(1);
+    exit 0;
+}
 
 my $year = 2014;
 my $month = 4;
@@ -31,16 +47,18 @@ sub process_day {
 
     $curl->setopt(CURLOPT_URL, $cur_url);
 
-    print "Processing: $cur_url\n";
+    print "Processing: $cur_url\n" if $verbose;
 
     my $response_body;
     $curl->setopt(CURLOPT_WRITEDATA, \$response_body);
 
     my $ret_code;
-    print "An error happen on `$cur_url`: " . $curl->strerr($ret_code) . ": " . $curl->err_buf . "\n" if $ret_code = $curl->perform;
+    print STDERR "An error happen on `$cur_url`: " . $curl->strerr($ret_code) . ": " . $curl->err_buf . "\n" if $ret_code = $curl->perform;
+    return if $ret_code;
 
     unless ($response_body =~ m#<$news_list_tag_name\s[^>]*class=["'][^'"]*$news_list_class_name\s*[^'"]*['"][^>]*>(.*)</$news_list_tag_name>#si) {
-        die "News list not found\n";
+        print STDERR "News list not found\n";
+        return;
     }
 
     my $news_list = $1;
@@ -51,22 +69,23 @@ sub process_day {
         $curl->setopt(CURLOPT_URL, $1);
         $response_body = "";
         if ($ret_code = $curl->perform) {
-            printf "An arror happen on $1: %s: %s\n", $curl->strerr($ret_code), $curl->err_buf;
+            printf STDERR "An arror happen on $1: %s: %s\n", $curl->strerr($ret_code), $curl->err_buf;
             next;
         }
 
-        print $out_f process_article($1, \$response_body);
+        my $data = process_article($1, \$response_body);
+        print $out_f $data if $data;
         $news_count++;
     }
 
-    print "$news_count news processed\n\n";
+    print "$news_count news processed\n\n" if $verbose;
 }
 
 sub process_article {
     my $url = shift;
     my $response_ptr = shift;
     unless ($$response_ptr =~ m#<$article_tag_name\s[^>]*id=['"][^'">]*$content_div_id\s*[^'">]*['"][^>]*>(.*)$#si) {
-        print "$url\n$content_div_id not found\n";
+        print STDERR "$url\n$content_div_id not found\n";
         return;
     }
     $$response_ptr = $1;
@@ -86,3 +105,27 @@ sub process_article {
 
     return "$title.\n$content\n\n";
 }
+
+__END__
+
+=head1 NAME
+
+B<get_news.pl> - Get news from given news website.
+
+=head1 SYNOPSIS
+
+B<get_news.pl> [options]
+
+=over 8
+
+Options:
+
+    --verbose|-v        Be verbose [default: false];
+
+    --website|-w        Download news from given website [default: http://www.mk.ru/];
+
+    --out|-o            Out file name [default: news_list];
+
+    --help|-h           Show this help;
+
+=cut
