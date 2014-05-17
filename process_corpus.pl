@@ -1,0 +1,132 @@
+#!/usr/bin/perl
+
+use strict;
+use warnings;
+
+use Config::Simple;
+use XML::Parser;
+use DBI;
+
+my %cfg;
+Config::Simple->import_from("config.cfg", \%cfg);
+
+my $dbh = DBI->connect("DBI:mysql:$cfg{'MySQL.DB'}", $cfg{'MySQL.User'}, $cfg{'MySQL.Pass'})
+    or die "Can't connect to database: $DBI::errstr\n";
+
+my %requests = (
+    last_id             => $dbh->prepare("select last_insert_id()"),
+    add_grammem         => $dbh->prepare("insert into grammemes(name, alias, description, parent) values (?, ?, ?, ?)"),
+    add_lemma_gr        => $dbh->prepare("insert into g_list(lemma_id, grammem_id) values (?, ?)"),
+    add_lemma           => $dbh->prepare("insert into lemmas(name, parent) values (?, ?)"),
+);
+
+my $xml_parser = XML::Parser->new(
+    Style                   => 'Debug',
+    'Non-Expat-Options'     => {
+        grammemes_parsed        => 0,
+        in_lemmas               => 0,
+        element                 => {},
+        grammemes               => {},
+        last_lemma_id           => -1,
+    },
+    Handlers                => {
+        Start                   => \&on_tag_start,
+        End                     => \&on_tag_end,
+        Char                    => \&on_tag_data,
+    },
+);
+$xml_parser->parsefile($cfg{'Corpus.XML'});
+
+sub on_tag_start {
+    my ($instance, $elem, %attrs) = @_;
+    my $opts = $instance->{'Non-Expat-Options'};
+
+    # Restrictions are ignored
+    my $element = $opts->{element};
+    if (!$opts->{grammemes_parsed}) {
+        if ($elem eq 'grammeme') {
+            $opts->{element} = { parent => $attrs{parent} };
+        } elsif ($elem eq 'name') {
+            $element->{name_given} = 1;
+        } elsif ($elem eq 'alias') {
+            $element->{alias_given} = 1;
+        } elsif ($elem eq 'description') {
+            $element->{description_given} = 1;
+        }
+    } elsif (!$opts->{in_lemmas} && $elem eq 'lemmata') {
+        $opts->{in_lemmas} = 1;
+    } elsif ($opts->{in_lemmas}) {
+        if ($elem =~ /^(?:l|f)$/) {
+            $opts->{element} = { name => $attrs{t} };
+            $opts->{element}->{parent} = $opts->{last_lemma_id} if $elem eq 'f';
+        } elsif ($elem eq 'g') {
+            push @{$element->{grammemes}}, $opts->{grammemes}->{$attrs{v}};
+        }
+    }
+}
+
+sub on_tag_end {
+    my ($instance, $elem) = @_;
+    my $opts = $instance->{'Non-Expat-Options'};
+
+    if (!$opts->{grammemes_parsed}) {
+        if ($elem eq 'grammemes') {
+            $opts->{grammemes_parsed} = 1;
+        } elsif ($elem eq 'grammeme') {
+            add_grammeme($opts->{element}, $opts->{grammemes});
+        }
+    } elsif ($opts->{in_lemmas}) {
+        if ($elem eq 'lemma') {
+            $opts->{last_lemma_id} = -1;
+        } elsif ($elem =~ /^(?:l|f)$/) {
+            $opts->{last_lemma_id} = add_lemma($opts->{element}, $opts->{last_lemma_id});
+        }
+    }
+}
+
+sub on_tag_data {
+    my ($instance, $data) = @_;
+
+    return unless $data;
+
+    my $element = $instance->{'Non-Expat-Options'}->{element};
+    for (qw( name alias description )) {
+        if ($element->{ $_ . "_given" }) {
+            $element->{ $_ } = $data;
+            $element->{ $_ . "_given" } = 0;
+            last;
+        }
+    }
+
+}
+
+sub last_id {
+    $requests{last_id}->execute;
+    $requests{last_id}->fetchrow_arrayref()->[0];
+}
+
+sub add_grammeme {
+    my $elem_ptr = shift;
+    my $grams_ptr = shift;
+
+    $elem_ptr->{parent_id} = $grams_ptr->{$elem_ptr->{parent}} if $elem_ptr->{parent};
+
+    $requests{add_grammem}->execute(@$elem_ptr{qw( name alias description parent_id )});
+    $grams_ptr->{$elem_ptr->{name}} = last_id;
+}
+
+sub add_lemma {
+    my $elem_ptr = shift;
+    my $last_id = shift;
+
+    $requests{add_lemma}->execute(@$elem_ptr{qw( name parent )});
+    my $id = last_id;
+
+    if (defined $elem_ptr->{grammemes}) {
+        my @ids = map { $id } (1 .. @{$elem_ptr->{grammemes}});
+        $requests{add_lemma_gr}->execute_array({}, \@ids, $elem_ptr->{grammemes});
+    }
+
+    return $id unless defined $elem_ptr->{parent};
+    $last_id;
+}

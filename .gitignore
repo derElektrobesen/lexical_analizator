@@ -1,3 +1,7 @@
 news_list
 *.swp
+*.swo
 *~
+dict.opcorpora.xml
+db_model.mwb
+*.bak
