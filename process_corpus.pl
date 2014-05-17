@@ -10,6 +10,16 @@ use DBI;
 my %cfg;
 Config::Simple->import_from("config.cfg", \%cfg);
 
+my $lines_to_read = $cfg{'Program.LinesToRead'};
+my $skip = 0;
+
+for (1 .. $cfg{'Program.nProcesses'} - 1) {
+    unless (fork) {
+        $skip = $_ * $lines_to_read;
+        last;
+    }
+}
+
 my $dbh = DBI->connect("DBI:mysql:$cfg{'MySQL.DB'}", $cfg{'MySQL.User'}, $cfg{'MySQL.Pass'})
     or die "Can't connect to database: $DBI::errstr\n";
 
@@ -18,6 +28,7 @@ my %requests = (
     add_grammem         => $dbh->prepare("insert into grammemes(name, alias, description, parent) values (?, ?, ?, ?)"),
     add_lemma_gr        => $dbh->prepare("insert into g_list(lemma_id, grammem_id) values (?, ?)"),
     add_lemma           => $dbh->prepare("insert into lemmas(name, parent) values (?, ?)"),
+    get_grammemes       => $dbh->prepare("select name, id from grammemes"),
 );
 
 my $xml_parser = XML::Parser->new(
@@ -35,7 +46,70 @@ my $xml_parser = XML::Parser->new(
         Char                    => \&on_tag_data,
     },
 );
-$xml_parser->parsefile($cfg{'Corpus.XML'});
+
+open my $fd, '<', $cfg{'Corpus.XML'} or die "Failure on open: $!\n";
+
+if ($cfg{'Program.SkipLines'}) {
+    skip_lines($fd, $cfg{'Program.SkipLines'});
+}
+if ($skip != 0) {
+    sleep $cfg{'Program.GrammemesLoadingTime'}; # Waiting for grammemes loading
+}
+
+print "Process $$ started.\n";
+
+skip_lines($fd, $skip);
+load_grammemes($xml_parser);
+read_file($fd, $xml_parser);
+print "Process $$ finished.\n";
+exit 0;
+
+sub read_file {
+    my $fd = shift;
+    my $instance = shift;
+    my $line;
+    for (1 .. $lines_to_read) {
+        $line = <$fd>;
+        last unless defined $line;
+        next unless $line;
+
+        chomp $line;
+
+        if ($line eq '</grammemes>') {
+            $instance->{'Non-Expat-Options'}->{grammemes_parsed} = 1;
+            next;
+        }
+
+        if ($line eq '<lemmata>') {
+            $instance->{'Non-Expat-Options'}->{in_lemmas} = 1;
+            next;
+        }
+
+        eval {
+            $instance->parse($line);
+        };
+        print "Incorrect parsed:\n$line: $@\n" if $@;
+    }
+}
+
+sub load_grammemes {
+    my $instance = shift;
+    my $ptr = $requests{get_grammemes};
+    $ptr->execute;
+
+    my %data = map { $_->[0], $_->[1] } @{$ptr->fetchall_arrayref};
+    $instance->{'Non-Expat-Options'}->{grammemes} = \%data;
+    if (%{$instance->{'Non-Expat-Options'}->{grammemes}}) {
+        $instance->{'Non-Expat-Options'}->{grammemes_parsed} = 1;
+        $instance->{'Non-Expat-Options'}->{in_lemmas} = 1;
+    }
+    $ptr->finish;
+}
+
+sub skip_lines {
+    my ($fd, $count) = @_;
+    <$fd> for 1 .. $count;
+}
 
 sub on_tag_start {
     my ($instance, $elem, %attrs) = @_;

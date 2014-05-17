@@ -2,17 +2,13 @@ SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0;
 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0;
 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='TRADITIONAL,ALLOW_INVALID_DATES';
 
-CREATE SCHEMA IF NOT EXISTS `lexical_analizator` DEFAULT CHARACTER SET utf8 COLLATE utf8_general_ci ;
-
-USE `lexical_analizator`;
-
 SET FOREIGN_KEY_CHECKS=0;
-DROP TABLE IF EXISTS `lexical_analizator`.`grammemes`;
-DROP TABLE IF EXISTS `lexical_analizator`.`lemmas`;
-DROP TABLE IF EXISTS `lexical_analizator`.`g_list`;
+DROP TABLE IF EXISTS `grammemes`;
+DROP TABLE IF EXISTS `lemmas`;
+DROP TABLE IF EXISTS `g_list`;
 SET FOREIGN_KEY_CHECKS=1;
 
-CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`grammemes` (
+CREATE  TABLE IF NOT EXISTS `grammemes` (
   `id` INT(11) NOT NULL AUTO_INCREMENT ,
   `name` VARCHAR(45) NOT NULL ,
   `alias` VARCHAR(10) DEFAULT NULL ,
@@ -28,14 +24,14 @@ CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`grammemes` (
   INDEX `fk_parent_idx` (`parent` ASC) ,
   CONSTRAINT `fk_parent`
     FOREIGN KEY (`parent` )
-    REFERENCES `lexical_analizator`.`grammemes` (`id` )
+    REFERENCES `grammemes` (`id` )
     ON DELETE NO ACTION
     ON UPDATE NO ACTION)
 ENGINE = InnoDB
 DEFAULT CHARACTER SET = utf8
 COLLATE = utf8_bin;
 
-CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`lemmas` (
+CREATE  TABLE IF NOT EXISTS `lemmas` (
   `id` INT(11) NOT NULL AUTO_INCREMENT ,
   `name` VARCHAR(255) NOT NULL ,
   `parent` INT(11) DEFAULT NULL ,
@@ -47,14 +43,14 @@ CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`lemmas` (
   INDEX `fk_p_key_idx` (`parent` ASC) ,
   CONSTRAINT `fk_p_key`
     FOREIGN KEY (`parent` )
-    REFERENCES `lexical_analizator`.`lemmas` (`id` )
+    REFERENCES `lemmas` (`id` )
     ON DELETE NO ACTION
     ON UPDATE NO ACTION)
 ENGINE = InnoDB
 DEFAULT CHARACTER SET = utf8
 COLLATE = utf8_general_ci;
 
-CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`g_list` (
+CREATE  TABLE IF NOT EXISTS `g_list` (
   `id` INT(11) NOT NULL AUTO_INCREMENT ,
   `lemma_id` INT(11) NOT NULL ,
   `grammem_id` INT(11) NOT NULL ,
@@ -64,12 +60,12 @@ CREATE  TABLE IF NOT EXISTS `lexical_analizator`.`g_list` (
   INDEX `gr_key` (`lemma_id` ASC, `grammem_id` ASC) ,
   CONSTRAINT `fk_lemma_id`
     FOREIGN KEY (`lemma_id` )
-    REFERENCES `lexical_analizator`.`lemmas` (`id` )
+    REFERENCES `lemmas` (`id` )
     ON DELETE NO ACTION
     ON UPDATE NO ACTION,
   CONSTRAINT `fk_g_list_grammemes1`
     FOREIGN KEY (`grammem_id` )
-    REFERENCES `lexical_analizator`.`grammemes` (`id` )
+    REFERENCES `grammemes` (`id` )
     ON DELETE NO ACTION
     ON UPDATE NO ACTION)
 ENGINE = InnoDB
