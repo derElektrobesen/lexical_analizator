@@ -73,10 +73,9 @@ sub dispatch {
     # Parent process main subroutine
     my $cfg = shift;
     my $select = IO::Select->new;
-    pre_dispatch($select, @_);
+    my $global_data = pre_dispatch($select, $cfg, @_);
     open my $data, '<:encoding(UTF-8)', $cfg->{'Analizator.News'} or wait_n_die "Can't open $cfg->{'Analizator.News'}: $!\n";
     open my $out, '>', $cfg->{'Analizator.OutFile'} or wait_n_die "Can't open $cfg->{'Analizator.OutFile'}: $!\n";
-    my %global_data = ( config => $cfg );
 
     my @ready;
     my $count = @_;
@@ -87,7 +86,7 @@ sub dispatch {
             $times_out = 0;
             my $str = readline $_;
             utf8::encode($str);
-            save_results($out, $str, \%global_data);
+            save_results($out, $str, $global_data);
 
             my $words = read_news($data);
             if (defined $words) {
@@ -102,17 +101,74 @@ sub dispatch {
         }
         last if $count < 1 or $times_out > 20;
     }
-    use Data::Dumper;
-    print Dumper $global_data{frequences};
+    if ($cfg->{'Analizator.LearnMode'}) {
+        store_lemmas_cache($global_data);
+    }
 }
 
 sub pre_dispatch {
     my $select = shift;
+    my $cfg = shift;
+
+    my %h = ( config => $cfg );
 
     while (my $pipeline = shift) {
         close $pipeline->{parent_socket};
         $select->add($pipeline->{child_socket});
     }
+
+    my $dbh = $h{dbh} = DBI->connect("DBI:mysql:$cfg->{'MySQL.DB'}", $cfg->{'MySQL.User'}, $cfg->{'MySQL.Pass'})
+        or wait_n_die "Can't connect to database: $DBI::errstr\n";
+    $h{requests} = {
+        insert_lemma_cache  => $dbh->prepare("insert into lemmas_cache(lemma_id, count) values (?, ?) " .
+                                             "on duplicate key update count = ?"),
+        get_cache           => $dbh->prepare("select l.name, l.id, c.count from lemmas l join lemmas_cache c on c.lemma_id = l.id"),
+    };
+    return \%h;
+}
+
+sub read_lemmas_cache {
+    my $req = shift;
+
+    $req->execute;
+    return map { $_->[0] => { id => $_->[1], count => $_->[2] } } @{$req->fetchall_arrayref};
+}
+
+sub store_lemmas_cache {
+    my $data_ptr = shift;
+    my %cache = read_lemmas_cache($data_ptr->{requests}->{get_cache});
+
+    print "Storring lemmas cache\n";
+
+    $cache{$_}->{count} += $data_ptr->{frequences}->{$_} for keys %{$data_ptr->{frequences}};
+
+    my @names;
+    for (keys %cache) {
+        push @names, "'$_'" unless defined $cache{$_}->{id};
+    }
+
+    if (@names) {
+        my ($slice_start, $slice_size) = (0, 100);
+        while ($slice_start < @names) {
+            my $str = "select name, id from lemmas where name in(" . join(", ", @names[$slice_start .. $slice_start + $slice_size]) . ")";
+            my $sth = $data_ptr->{dbh}->prepare($str);
+            $sth->execute;
+            $cache{ $_->[0] }->{id} = $_->[1] for @{$sth->fetchall_arrayref};
+            $slice_start += $slice_size;
+            printf "$slice_start of %d complete\n", scalar @names;
+        }
+    }
+    print "Request complete\n";
+
+    my (@counts, @ids);
+    for (keys %cache) {
+        if ($cache{$_}->{id} && $cache{$_}->{count}) {
+            push @counts, $cache{$_}->{count};
+            push @ids, $cache{$_}->{id};
+        }
+    }
+
+    $data_ptr->{requests}->{insert_lemma_cache}->execute_array({}, \@ids, \@counts);
 }
 
 sub parse_input {
@@ -212,7 +268,7 @@ sub count_frequency {
     my $words = shift;
 
     for (@$words) {
-        $freq_ptr->{$_->{word}}++ if $_->{word} =~ /^[А-Яа-я]+$/;
+        $freq_ptr->{$_->{word}}++ if $_->{word} =~ /^[а-я]+$/;
     }
 
     my @ff = map  { $_ => $freq_ptr->{$_} }
