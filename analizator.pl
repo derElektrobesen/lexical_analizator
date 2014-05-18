@@ -2,11 +2,14 @@
 
 use strict;
 use warnings;
+use utf8;
 
 use Config::Simple;
 use IO::Handle;
 use IO::Select;
 use Socket;
+use DBI;
+use Encode;
 
 my %cfg;
 Config::Simple->import_from("config.cfg", \%cfg);
@@ -14,21 +17,11 @@ Config::Simple->import_from("config.cfg", \%cfg);
 # Open pipes
 my @pipes;
 for (0 .. $cfg{'Analizator.nProcesses'} - 1) {
-=cut
-    my ($p, $c);
-    socketpair($p, $c, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "$!\n";
-    $p->autoflush(1);
-    $c->autoflush(1);
-
-    push @pipes, {
-        parent_socket => $p,
-        child_socket  => $c
-    };
-
-=cut
     socketpair(my $p, my $c, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "Socketpair failure: $!\n";
     $p->autoflush(1);
     $c->autoflush(1);
+    binmode $p, ":encoding(UTF-8)";
+    binmode $c, ":encoding(UTF-8)";
     push @pipes, {
         parent_socket => $p,
         child_socket  => $c
@@ -38,20 +31,7 @@ for (0 .. $cfg{'Analizator.nProcesses'} - 1) {
 my $is_parent;
 my $pipeline_index;
 my @pids;
-=cut
-if (my $pid = fork) {
-    close $pipes[0]->{parent_socket};
 
-    print {$pipes[0]->{child_socket}} "Hello!";
-    waitpid $pid, 0;
-} else {
-    close $pipes[0]->{child_socket};
-
-    my $m = readline $pipes[0]->{parent_socket};
-    print "$$: $m\n";
-}
-exit 0;
-=cut
 # Fork
 for (0 .. $cfg{'Analizator.nProcesses'} - 1) {
     my $pid = fork;
@@ -77,7 +57,7 @@ if ($is_parent) {
         close $_->{parent_socket} if $index != $pipeline_index;
         $index++;
     }
-    start_work($pipes[$pipeline_index]->{parent_socket});
+    start_work(\%cfg, $pipes[$pipeline_index]->{parent_socket});
 }
 exit 0;
 
@@ -94,16 +74,20 @@ sub dispatch {
     my $cfg = shift;
     my $select = IO::Select->new;
     pre_dispatch($select, @_);
-    open my $data, '<', $cfg->{'Analizator.News'} or wait_n_die "Can't open $cfg->{'Analizator.News'}: $!\n";
+    open my $data, '<:encoding(UTF-8)', $cfg->{'Analizator.News'} or wait_n_die "Can't open $cfg->{'Analizator.News'}: $!\n";
     open my $out, '>', $cfg->{'Analizator.OutFile'} or wait_n_die "Can't open $cfg->{'Analizator.OutFile'}: $!\n";
+    my %global_data = ( config => $cfg );
 
     my @ready;
     my $count = @_;
+    my $times_out = 0;
     while (1) {
         my @handles = $select->can_read($cfg->{'Analizator.WaitTimeout'});
         for (@handles) {
+            $times_out = 0;
             my $str = readline $_;
-            save_results($out, $str);
+            utf8::encode($str);
+            save_results($out, $str, \%global_data);
 
             my $words = read_news($data);
             if (defined $words) {
@@ -113,9 +97,13 @@ sub dispatch {
                 $count--;
             }
         }
-        last unless $count;
+        unless (@handles) {
+            $times_out++;
+        }
+        last if $count < 1 or $times_out > 20;
     }
-    waitpid -1, 0;
+    use Data::Dumper;
+    print Dumper $global_data{frequences};
 }
 
 sub pre_dispatch {
@@ -128,8 +116,8 @@ sub pre_dispatch {
 }
 
 sub parse_input {
-    my $str = shift;
-    $str =~ s/([,.;:"'()])/ $1 /g;
+    my $str = lc shift;
+    $str =~ s/([«»,.;:"'()])/ $1 /g;
     $str =~ s/\s+/ /g;
     $str;
 }
@@ -139,7 +127,7 @@ sub read_news {
     my $news_name = 0;
     while (defined $news_name && !$news_name) {
         $news_name = <$fd>;
-        chomp $news_name;
+        chomp $news_name if defined $news_name;
     }
 
     my $news_data = <$fd>;
@@ -154,38 +142,85 @@ sub read_news {
 sub save_results {
     my $fd = shift;
     my $data = shift;
+    my $glob = shift;
 
-    print "$$: $data\n";
+    chomp $data;
+    return if $data eq "0";
+
+    if ($glob->{config}->{'Analizator.LearnMode'}) {
+        my %freqs = split /\s+/, $data;
+        $glob->{frequences}->{$_} += $freqs{$_} for keys %freqs;
+    }
 }
 
 sub start_work {
     # Child process main subroutine
+    my $cfg = shift;
     my $socket = shift;
     my $handlers = prepare_handlers();
+    $handlers->{config} = $cfg;
     read_grammemes($handlers);
 
     print $socket "0\n"; # Can read messages from now
 
     while (1) {
         my $str = readline $socket;
-        print "Read: $str\n";
         last unless defined $str;
-        $str = process_line($str);
+        $str = process_line($handlers, $str);
         chomp $str;
         print $socket "$str\n";
     }
 }
 
 sub prepare_handlers {
-
+    my %h;
+    my $dbh = $h{dbh} = DBI->connect("DBI:mysql:$cfg{'MySQL.DB'}", $cfg{'MySQL.User'}, $cfg{'MySQL.Pass'})
+        or wait_n_die "Can't connect to database: $DBI::errstr\n";
+    $h{requests} = {
+        last_id         => $dbh->prepare("select last_insert_id()"),
+        get_grammemes   => $dbh->prepare("select id, description from grammemes"),
+    };
+    $h{words_frequency} = {};
+    return \%h;
 }
 
 sub read_grammemes {
-    my $handlers = shift;
+    my $h = shift;
+    $h->{requests}->{get_grammemes}->execute;
+    my %data = map { $_->[0], $_->[1] } @{$h->{requests}->{get_grammemes}->fetchall_arrayref};
+    $h->{grammemes} = \%data;
 }
 
 sub process_line {
+    my $handlers = shift;
     my $line = shift;
-    sleep 2;
-    return "Processed!";
+    chomp $line;
+    my @words = map { { word => $_, props => [] } } split / /, $line;
+
+    my $response;
+    if ($handlers->{config}->{'Analizator.LearnMode'}) {
+        $response = count_frequency($handlers, \@words);
+    } else {
+        $response = "0"; # TODO
+    }
+    return $response;
+}
+
+sub count_frequency {
+    my $h = shift;
+    my $freq_ptr = $h->{words_frequency};
+    my $words = shift;
+
+    for (@$words) {
+        $freq_ptr->{$_->{word}}++ if $_->{word} =~ /^[А-Яа-я]+$/;
+    }
+
+    my @ff = map  { $_ => $freq_ptr->{$_} }
+             grep { $freq_ptr->{$_} >= $h->{config}->{'Analizator.WordsMinFreq'} }
+             keys %$freq_ptr;
+
+    $h->{words_frequency} = {};
+
+    return join ' ', @ff if @ff;
+    return "0";
 }
