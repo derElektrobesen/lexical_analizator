@@ -16,10 +16,16 @@ my $article_tag_name = "div";
 my $out_f_name = "news_list";
 my $show_help = 0;
 my $verbose = 0;
+my $year = 2014;
+my $month = 4;
+my $days_count = 30;
 
 GetOptions(
     "website=s"     => \$home_url,
     "out=s"         => \$out_f_name,
+    "year=s"        => \$year,
+    "month=s"       => \$month,
+    "days=s"        => \$days_count,
     "verbose"       => \$verbose,
     "help"          => \$show_help,
 );
@@ -28,10 +34,6 @@ if ($show_help) {
     pod2usage(1);
     exit 0;
 }
-
-my $year = 2014;
-my $month = 4;
-my $days_count = 30;
 
 open my $out_f, ">", $out_f_name or die "Error while openning file $out_f_name: $!\n";
 
@@ -123,6 +125,12 @@ Options:
     --verbose|-v        Be verbose [default: false];
 
     --website|-w        Download news from given website [default: http://www.mk.ru/];
+
+    --year|-y           Year of the news [default: 2014]
+
+    --month|-m          Month of the news [default: 4]
+
+    --days|-d           Days in month [default: 30]
 
     --out|-o            Out file name [default: news_list];
 
