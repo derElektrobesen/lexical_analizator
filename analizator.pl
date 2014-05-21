@@ -85,7 +85,14 @@ sub dispatch {
         for (@handles) {
             $times_out = 0;
             my $str = readline $_;
-            utf8::encode($str);
+
+            unless (defined $str) {
+                close $_;
+                $count--;
+                next;
+            }
+
+            #utf8::encode($str);
             save_results($out, $str, $global_data);
 
             my $words = read_news($data);
@@ -122,7 +129,8 @@ sub pre_dispatch {
     $h{requests} = {
         insert_lemma_cache  => $dbh->prepare("insert into lemmas_cache(lemma_id, count) values (?, ?) " .
                                              "on duplicate key update count = ?"),
-        get_cache           => $dbh->prepare("select l.name, l.id, c.count from lemmas l join lemmas_cache c on c.lemma_id = l.id"),
+        get_cache           => $dbh->prepare("select l.name, l.id, c.count from lemmas_cache c join lemmas l " .
+                                             "on l.id = c.lemma_id order by count desc limit 20000"),
     };
     return \%h;
 }
@@ -148,14 +156,16 @@ sub store_lemmas_cache {
     }
 
     if (@names) {
-        my ($slice_start, $slice_size) = (0, 100);
+        my ($slice_start, $slice_size) = (0, $data_ptr->{config}->{'Analizator.InsertSliceSize'});
         while ($slice_start < @names) {
-            my $str = "select name, id from lemmas where name in(" . join(", ", @names[$slice_start .. $slice_start + $slice_size]) . ")";
+            my $end = $slice_start + $slice_size;
+            $end = @names - 1 if $end >= @names;
+            my $str = "select name, id from lemmas where name in(" . join(", ", @names[$slice_start .. $end]) . ")";
             my $sth = $data_ptr->{dbh}->prepare($str);
             $sth->execute;
             $cache{ $_->[0] }->{id} = $_->[1] for @{$sth->fetchall_arrayref};
-            $slice_start += $slice_size;
-            printf "$slice_start of %d complete\n", scalar @names;
+            $slice_start += $end;
+            print "$slice_start of " . scalar(@names) . " complete\n";
         }
     }
     print "Request complete\n";
@@ -168,7 +178,7 @@ sub store_lemmas_cache {
         }
     }
 
-    $data_ptr->{requests}->{insert_lemma_cache}->execute_array({}, \@ids, \@counts);
+    $data_ptr->{requests}->{insert_lemma_cache}->execute_array({}, \@ids, \@counts, \@counts);
 }
 
 sub parse_input {
@@ -206,6 +216,9 @@ sub save_results {
     if ($glob->{config}->{'Analizator.LearnMode'}) {
         my %freqs = split /\s+/, $data;
         $glob->{frequences}->{$_} += $freqs{$_} for keys %freqs;
+    } else {
+        my @aa = split /; /, $data;
+        print $fd join "\n", @aa;
     }
 }
 
@@ -216,6 +229,11 @@ sub start_work {
     my $handlers = prepare_handlers();
     $handlers->{config} = $cfg;
     read_grammemes($handlers);
+
+    unless ($cfg->{'Analizator.LearnMode'}) {
+        my %cache = read_lemmas_cache($handlers->{requests}->{get_cache});
+        $handlers->{cache} = \%cache;
+    }
 
     print $socket "0\n"; # Can read messages from now
 
@@ -233,8 +251,9 @@ sub prepare_handlers {
     my $dbh = $h{dbh} = DBI->connect("DBI:mysql:$cfg{'MySQL.DB'}", $cfg{'MySQL.User'}, $cfg{'MySQL.Pass'})
         or wait_n_die "Can't connect to database: $DBI::errstr\n";
     $h{requests} = {
-        last_id         => $dbh->prepare("select last_insert_id()"),
         get_grammemes   => $dbh->prepare("select id, description from grammemes"),
+        get_cache       => $dbh->prepare("select l.name, l.id, c.count from lemmas_cache c join lemmas l " .
+                                         "on l.id = c.lemma_id order by count desc limit 20000"),
     };
     $h{words_frequency} = {};
     return \%h;
@@ -251,15 +270,124 @@ sub process_line {
     my $handlers = shift;
     my $line = shift;
     chomp $line;
-    my @words = map { { word => $_, props => [] } } split / /, $line;
+    my @words = grep { $_ } split / /, $line;
 
     my $response;
     if ($handlers->{config}->{'Analizator.LearnMode'}) {
         $response = count_frequency($handlers, \@words);
     } else {
-        $response = "0"; # TODO
+        $response = process_words($handlers, \@words);
     }
     return $response;
+}
+
+sub process_words {
+    my ($h, $words) = @_;
+
+    my @res;
+    my @not_cached_words;
+    my @not_cached_props;
+    my @not_cached;
+
+    my $i = -1;
+    for (@$words) {
+        $i++;
+
+        my $str = $_;
+        utf8::encode($str);
+        my $ptr = $h->{cache}->{$str};
+
+        my %item = ( word => $str, id => $ptr->{id} );
+        push @res, \%item;
+        next unless /^[а-я]+$/;
+
+        unless (defined $ptr && %$ptr) {
+            push @not_cached_words, $i;
+            push @not_cached, $i;
+            next;
+        }
+
+        unless (defined $ptr->{properties}) {
+            push @not_cached_props, $i;
+            push @not_cached, $i;
+            next;
+        }
+
+        $item{props} = $ptr->{properties};
+    }
+
+    request_words($h, \@res, \@not_cached_words) if @not_cached_words;
+    request_props($h, \@res, \@not_cached_props) if @not_cached_props;
+    for my $index (@not_cached) {
+        $res[$index]->{props} = $h->{cache}->{ $res[$index]->{word} }->{properties};
+    }
+
+    return join '; ', map {
+        my $props = "unknown";
+        $props = join ', ', @{$_->{props}} if defined $_->{props};
+        "$_->{word}: [$props]";
+    } @res;
+}
+
+sub request_words {
+    my ($h, $words, $indexes) = @_;
+    my ($cur_index, $index_step) = (0, $h->{config}->{'Analizator.InsertSliceSize'});
+    my $cache = $h->{cache};
+    my $grammemes = $h->{grammemes};
+
+    my @names = map { $_->{word} } @$words[ @$indexes ];
+
+    while ($cur_index < @$indexes) {
+        my $end = $cur_index + $index_step;
+        $end = @$indexes - 1 if $end >= @$indexes;
+
+        my $str = 'select l.id, l.name, ll.name as `parent`, gl.grammem_id from g_list gl join lemmas l on ' .
+                  'l.id = gl.lemma_id left outer join lemmas ll on ll.id = l.parent where l.name in ("';
+        $str .= join('", "', @names[$cur_index .. $end]) . '")';
+        my $sth = $h->{dbh}->prepare($str);
+        $sth->execute;
+
+        while (my ($id, $name, $parent, $grammem) = $sth->fetchrow_array) {
+            if (defined $parent) {
+                next if defined $cache->{$name}->{form_id} && $cache->{$name}->{form_id} != $id;
+                $cache->{$name}->{id} = $cache->{$name}->{form_id} = $id;
+            }
+            push @{$cache->{$name}->{properties}}, $grammemes->{$grammem} if defined $grammemes->{$grammem};
+        }
+
+        $cur_index += $index_step;
+    }
+}
+
+sub request_props {
+    my ($h, $words, $indexes) = @_;
+    my ($cur_index, $index_step) = (0, $h->{config}->{'Analizator.InsertSliceSize'});
+    my $cache = $h->{cache};
+    my $grammemes = $h->{grammemes};
+
+    my @ids = map { $_->{id} } @$words[ @$indexes ];
+    my %names;
+
+    while ($cur_index < @$indexes) {
+        my $end = $cur_index + $index_step;
+        $end = @$indexes - 1 if $end >= @$indexes;
+
+        my $str = "select l.name, gl.grammem_id, gg.grammem_id from g_list gl join lemmas l on l.id = gl.lemma_id " .
+                  "left outer join lemmas ll on ll.id = l.parent left outer join g_list gg on gg.lemma_id = ll.id " .
+                  "where gl.lemma_id in (";
+        $str .= join(", ", @ids[$cur_index .. $end]) . ") order by l.name";
+        my $sth = $h->{dbh}->prepare($str);
+        $sth->execute;
+
+        while (my ($name, $gr_id1, $gr_id2) = $sth->fetchrow_array) {
+            $names{$name}->{$gr_id1} = 1;
+            $names{$name}->{$gr_id2} = 1;
+        }
+        $cur_index += $index_step;
+    }
+    for my $name (keys %names) {
+        @{$cache->{$name}->{properties}} = grep { $_ } map { $grammemes->{$_} } keys %{$names{$name}};
+    }
 }
 
 sub count_frequency {

@@ -43,6 +43,7 @@ CREATE  TABLE IF NOT EXISTS `lemmas` (
   INDEX `parent_key` (`parent` ASC, `name` ASC) ,
   INDEX `all_key` (`id` ASC, `name` ASC, `parent` ASC) ,
   INDEX `fk_p_key_idx` (`parent` ASC) ,
+  INDEX `id_parent` (`parent` ASC, `id` ASC),
   CONSTRAINT `fk_p_key`
     FOREIGN KEY (`parent` )
     REFERENCES `lemmas` (`id` )
@@ -80,6 +81,7 @@ CREATE TABLE IF NOT EXISTS `lemmas_cache` (
     `count` INT(11) NOT NULL DEFAULT 0 ,
     PRIMARY KEY (`id`) ,
     UNIQUE INDEX `lemma_id_UNIQUE` (`lemma_id` ASC) ,
+    INDEX `count_k` (`count` DESC),
     INDEX `key` (`lemma_id` ASC))
 ENGINE = MyISAM
 DEFAULT CHARACTER SET = utf8

@@ -15,3 +15,6 @@ They will be downloaded from [mk.ru website](http://www.mk.ru/) by default.
 `config.cfg` file contains configuration for all programs. All parametrs are required.
 
 `analizator.pl` script is main. Run it with prepared database and news list.
+
+If a word form haven't got properties (for example, if a word form is equal as a parent form),
+this word can be processed incorrectly. Use `process_empty_words.pl` script to fix it.
